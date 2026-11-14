@@ -958,6 +958,9 @@ for (const c of [
   { compact: '50', pct: 40, show: true },
   { compact: undefined, pct: 89, show: false },
   { compact: undefined, pct: 90, show: true },
+  // 기준 − 10이 0 이하가 되는 낮은 기준에서도 경고 시작점은 1%로 묶인다.
+  { compact: '5', pct: 0, show: false },
+  { compact: '5', pct: 1, show: true },
 ]) {
   test(`컴팩트 임박 경고: 압축 기준 ${c.compact ?? '없음'}, Context ${c.pct}% → ${c.show ? '표시' : '숨김'}`, async ($, on) => {
     stubEngine(on, [], { pct: c.pct, frame: 0, compact: c.compact })
@@ -1192,7 +1195,7 @@ test('새 계열의 이모지는 로봇이 아니고, 같은 이름이면 늘 �
 ## 단계 3. 검증
 
 1. `claude plugin validate <MOD_DIR>`를 실행해 주세요. 타입 오류(`error TS`)나 `skipped`가 없어야 합니다. README와 LICENSE가 없다는 항목 2건은 공유용 제출 규칙이라 무시해도 됩니다. 이 2건은 출력에 "refuses a submission"이라는 문장과 함께 나오지만 같은 이유이므로 함께 무시하세요.
-2. `claude plugin test <MOD_DIR>`를 실행해 주세요. 테스트 34건이 모두 통과해야 합니다.
+2. `claude plugin test <MOD_DIR>`를 실행해 주세요. 테스트 36건이 모두 통과해야 합니다.
 3. 실패가 있으면 코드를 임의로 고치지 말고 출력 전체를 보여 주세요.
 
 ## 단계 4. 현재 세션에 바로 적용
@@ -1212,3 +1215,4 @@ Claude는 슬래시 명령을 직접 실행할 수 없으므로, 아래처럼 �
 - **계정 이메일 표시**: 첫 줄에 로그인한 계정의 이메일이 그대로 보입니다. 화면을 공유하거나 캡처할 때 주의해 주세요.
 - **밴드 폭**: 터미널 폭이 약 110칸보다 좁으면 줄이 넘칠 수 있습니다.
 - **구독이 아닌 세션**: 5시간·7일 한도 정보가 없으면 두 막대는 나오지 않고 Context만 표시됩니다.
+- **낮은 압축 기준**: "⚠ 컴팩트 임박" 경고는 압축 기준보다 10%p 앞에서 뜹니다. 기준을 11% 이하로 두면 경고 시작점이 1%로 묶여서 Context 1%부터 경고가 계속 보입니다.

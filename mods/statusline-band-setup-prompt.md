@@ -11,7 +11,7 @@
 입력창 위 밴드(`AbovePrompt`)에 상태 표시줄을 그리는 mod입니다. 표시 내용은 다음과 같습니다.
 
 - 첫 줄: 모델 이모지와 모델명(예: Sonnet 5.5), effort, 폴더, git 브랜치, 그리고 흐리게 계정 이메일과 구독 종류
-- 둘째~넷째 줄: Context(자동 압축을 설정했다면 압축 기준 %도 함께), 5시간 한도, 7일 한도를 한 줄에 하나씩, 라벨·막대·%·부가 정보가 세로로 맞게 표시(막대 색이 반 칸 단위로 부드럽게 이어지고, % 숫자는 90% 이상이면 빨강)
+- 둘째~넷째 줄: Context(자동 압축을 설정했다면 압축 기준 %도 함께, "⚠ 컴팩트 임박" 경고는 압축 기준보다 10%p 앞에서, 설정이 없으면 90%부터), 5시간 한도, 7일 한도를 한 줄에 하나씩, 라벨·막대·%·부가 정보가 세로로 맞게 표시(막대 색이 반 칸 단위로 부드럽게 이어지고, % 숫자는 90% 이상이면 빨강)
 - 작업 중: 메인 할 일 진행(`3/7`)과 서브에이전트별 상태·도구 횟수·경과 시간
 - 테두리: 평소에는 파란색, 작업 중에는 파랑과 보라가 시계 방향으로 흐르며, 응답이 끝난 뒤 3초 동안 유지
 - 마지막 줄: CPU·RAM 막대(10초마다 갱신), 비용, 세션 경과 시간
@@ -323,6 +323,8 @@ const LABEL_CELLS = 7
 const cellWidth = (s: string) => [...s].reduce((n, ch) => n + (ch.charCodeAt(0) > 0x2e7f ? 2 : 1), 0)
 const padCells = (s: string, n: number) => s + ' '.repeat(Math.max(0, n - cellWidth(s)))
 const FOOT_BAR = 5 // 하단 CPU·RAM 막대 칸 수(윗줄 게이지보다 작게)
+const WARN_DEFAULT = 90 // 자동 압축 기준을 설정하지 않았을 때 "컴팩트 임박"을 알리는 Context %
+const WARN_MARGIN = 10 // 자동 압축 기준을 설정했을 때, 기준보다 이만큼(%p) 앞에서 알린다
 
 const MACHINE_INTERVAL_MS = 10_000
 const HEAD_INTERVAL_MS = 2_000
@@ -682,7 +684,8 @@ export const register: Register = on => {
         snap.ctxTokens !== null ? `${formatTokens(snap.ctxTokens)}/${formatTokens(snap.ctxWindow)}` : '',
         snap.compactPct !== null ? `${snap.compactPct}%에서 압축` : '',
       ].filter(Boolean)
-      const warn = snap.ctxPct >= 90 ? ' ⚠ 컴팩트 임박' : ''
+      const warnAt = snap.compactPct !== null ? Math.max(1, snap.compactPct - WARN_MARGIN) : WARN_DEFAULT
+      const warn = snap.ctxPct >= warnAt ? ' ⚠ 컴팩트 임박' : ''
       rows.push(gauge('ctx', '🧠', 'Context', snap.ctxPct, parts.join(' · '), warn))
     }
 
@@ -949,6 +952,26 @@ for (const bad of ['abc', '0', '100', '', undefined]) {
   })
 }
 
+// 압축 기준을 설정했으면 기준 10%p 전부터, 설정이 없으면 90%부터 "컴팩트 임박"을 알린다.
+for (const c of [
+  { compact: '50', pct: 39, show: false },
+  { compact: '50', pct: 40, show: true },
+  { compact: undefined, pct: 89, show: false },
+  { compact: undefined, pct: 90, show: true },
+]) {
+  test(`컴팩트 임박 경고: 압축 기준 ${c.compact ?? '없음'}, Context ${c.pct}% → ${c.show ? '표시' : '숨김'}`, async ($, on) => {
+    stubEngine(on, [], { pct: c.pct, frame: 0, compact: c.compact })
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+    const ui = await $.ui.mount(BAND(false))
+    const all = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('|')
+
+    if (c.show) expect(all).toContain('컴팩트 임박')
+    else expect(all).not.toContain('컴팩트 임박')
+    await ui.unmount()
+  })
+}
+
 test('맨 아래 줄의 CPU·RAM 막대는 5칸이다', async ($, on) => {
   stubEngine(on, [], { pct: 42, frame: 0 })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
@@ -1169,7 +1192,7 @@ test('새 계열의 이모지는 로봇이 아니고, 같은 이름이면 늘 �
 ## 단계 3. 검증
 
 1. `claude plugin validate <MOD_DIR>`를 실행해 주세요. 타입 오류(`error TS`)나 `skipped`가 없어야 합니다. README와 LICENSE가 없다는 항목 2건은 공유용 제출 규칙이라 무시해도 됩니다. 이 2건은 출력에 "refuses a submission"이라는 문장과 함께 나오지만 같은 이유이므로 함께 무시하세요.
-2. `claude plugin test <MOD_DIR>`를 실행해 주세요. 테스트 30건이 모두 통과해야 합니다.
+2. `claude plugin test <MOD_DIR>`를 실행해 주세요. 테스트 34건이 모두 통과해야 합니다.
 3. 실패가 있으면 코드를 임의로 고치지 말고 출력 전체를 보여 주세요.
 
 ## 단계 4. 현재 세션에 바로 적용

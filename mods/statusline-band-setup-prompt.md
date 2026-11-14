@@ -10,12 +10,11 @@
 
 입력창 위 밴드(`AbovePrompt`)에 상태 표시줄을 그리는 mod입니다. 표시 내용은 다음과 같습니다.
 
-- 첫 줄: 계정 이메일과 구독 종류, 모델 이모지와 모델명(예: Sonnet 5.5), effort, 폴더, git 브랜치
-- 둘째 줄: Context, 5시간 한도, 7일 한도 막대(색이 반 칸 단위로 부드럽게 이어짐)
-- 셋째 줄: CPU, RAM 사용량(10초마다 갱신)
+- 첫 줄: 모델 이모지와 모델명(예: Sonnet 5.5), effort, 폴더, git 브랜치, 그리고 흐리게 계정 이메일과 구독 종류
+- 둘째~넷째 줄: Context(자동 압축을 설정했다면 압축 기준 %도 함께), 5시간 한도, 7일 한도를 한 줄에 하나씩, 라벨·막대·%·부가 정보가 세로로 맞게 표시(막대 색이 반 칸 단위로 부드럽게 이어지고, 90% 이상은 빨강)
 - 작업 중: 메인 할 일 진행(`3/7`)과 서브에이전트별 상태·도구 횟수·경과 시간
 - 테두리: 평소에는 파란색, 작업 중에는 파랑과 보라가 시계 방향으로 흐르며, 응답이 끝난 뒤 3초 동안 유지
-- 마지막 줄: 비용과 세션 경과 시간
+- 마지막 줄: CPU·RAM 막대(10초마다 갱신), 비용, 세션 경과 시간
 
 ## 단계 0. 적용 범위 선택
 
@@ -66,9 +65,10 @@
 - 선택지 2: **설정 안 함** — 이 설정은 건드리지 않습니다 (기존 값이 있으면 그대로 유지)
 
 **질문 2** (질문 1에서 "설정함"을 고른 경우에만)
-- 질문: "컨텍스트가 몇 %일 때 자동 압축할까요?"
-- 선택지: **40**, **60**, **80**
-- 다른 숫자를 원하면 "Other"로 직접 입력할 수 있습니다.
+- 질문: "컨텍스트가 몇 %일 때 자동 압축할까요? 1~99 사이 숫자를 입력해 주세요."
+- 고정 선택지(40/60/80 등)는 두지 않습니다. 사용자가 숫자를 직접 입력하게 하세요. (선택지 도구를 쓴다면 "Other" 입력으로 받습니다.)
+- 숫자를 받으면 아래처럼 20칸 프로그레스바로 보여 주고, 이 값이 맞는지 확인하세요. 아니라고 하면 다시 입력받습니다.
+  `[██████████░░░░░░░░░░] 50%` (채운 칸 수 = 값 ÷ 5, 반올림)
 
 규칙:
 - 입력값은 1~99 사이의 정수여야 합니다. 벗어나거나 숫자가 아니면 다시 물어보세요.
@@ -137,6 +137,7 @@ export type Snap = {
   ctxPct: number | null
   ctxTokens: number | null
   ctxWindow: number
+  compactPct: number | null
   limits: Limit[]
   usd: number | null
   elapsedMs: number
@@ -317,6 +318,12 @@ const fmtTime = (ms: number) => {
 }
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
 
+// 한글 같은 전각 글자는 2칸으로 세어, 게이지 라벨을 같은 칸 수에 맞춘다.
+const LABEL_CELLS = 7
+const cellWidth = (s: string) => [...s].reduce((n, ch) => n + (ch.charCodeAt(0) > 0x2e7f ? 2 : 1), 0)
+const padCells = (s: string, n: number) => s + ' '.repeat(Math.max(0, n - cellWidth(s)))
+const FOOT_BAR = 5 // 하단 CPU·RAM 막대 칸 수(윗줄 게이지보다 작게)
+
 const MACHINE_INTERVAL_MS = 10_000
 const HEAD_INTERVAL_MS = 2_000
 const MACHINE_SCRIPT =
@@ -476,6 +483,12 @@ async function currentEffort($: EngineInterface, model: string): Promise<string 
   }
 }
 
+// 자동 압축 기준(%). 환경 변수가 없거나 1~99 정수가 아니면 null이라 표시하지 않는다.
+async function compactThreshold($: EngineInterface): Promise<number | null> {
+  const v = Number(await $.env.get('CLAUDE_AUTOCOMPACT_PCT_OVERRIDE'))
+  return Number.isInteger(v) && v >= 1 && v <= 99 ? v : null
+}
+
 // /model, /effort는 응답 없이 바뀌므로 짧은 주기로 두 값만 확인해 바뀌었을 때만 고친다.
 async function refreshHead($: EngineInterface) {
   const snap = await read($, snapAtom)
@@ -518,6 +531,7 @@ async function refresh($: EngineInterface) {
     ctxPct: usage.context.percent ?? null,
     ctxTokens: usage.context.tokens ?? null,
     ctxWindow: usage.context.window,
+    compactPct: await compactThreshold($),
     limits,
     usd: usage.cost?.usd ?? null,
     elapsedMs: now - usage.startedAt,
@@ -601,18 +615,18 @@ export const register: Register = on => {
 
     const { Box, Text } = $.ui.resolve(e)
 
-    const bar = (pct: number) => {
+    const bar = (pct: number, width = WIDTH) => {
       const p = Math.max(0, Math.min(100, pct))
       // 8분의 1칸 단위로 먼저 반올림해야 7.96칸 같은 값이 한 칸을 잃지 않는다.
-      const totalEighths = Math.round((p * WIDTH * 8) / 100)
+      const totalEighths = Math.round((p * width * 8) / 100)
       const filled = Math.floor(totalEighths / 8)
       const eighth = totalEighths % 8
       const hasPartial = eighth > 0
-      const empty = WIDTH - filled - (hasPartial ? 1 : 0)
+      const empty = width - filled - (hasPartial ? 1 : 0)
       const cells = []
       // 채운 칸마다 '▌'의 글자색(왼쪽 반 칸)과 배경색(오른쪽 반 칸)을 따로 칠해, 8칸 막대에서도
       // 색이 16단계로 이어지게 한다. 색 경계가 뚜렷하게 끊겨 보이지 않는다.
-      const at = (k: number) => gradient((k + 0.5) / (2 * WIDTH))
+      const at = (k: number) => gradient((k + 0.5) / (2 * width))
       for (let i = 0; i < filled; i++) {
         cells.push(<Text key={`f${i}`} color={at(2 * i)} backgroundColor={at(2 * i + 1)}>▌</Text>)
       }
@@ -623,71 +637,61 @@ export const register: Register = on => {
       return cells
     }
 
-    // 한 줄에 여러 항목을 놓기 위한 조각: 아이콘 라벨 막대 백분율 (부가 정보)
-    const seg = (key: string, icon: string, label: string, pct: number, tail: string, warn = '') => (
+    // 90% 이상은 빨강, 그 아래는 초록 → 노랑 → 코랄 그라데이션
+    const pctColor = (p: number) => (p >= 90 ? '#e04444' : gradient(p / 100))
+
+    // 게이지 한 줄: 라벨 칸과 % 칸을 고정해, 위아래 줄의 막대와 숫자가 세로로 맞게 한다.
+    const gauge = (key: string, icon: string, label: string, pct: number, tail: string, warn = '') => (
       <Text key={key}>
-        {icon} {label} {bar(pct)} <Text color={gradient(pct / 100)}>{Math.round(pct)}%</Text>
+        {icon} <Text color={GRAY}>{padCells(label, LABEL_CELLS)}</Text> {bar(pct)}{'  '}
+        <Text bold color={pctColor(pct)}>{`${Math.round(pct)}%`.padEnd(5)}</Text>
         <Text dimColor>{tail}</Text>
         <Text color="#e04444" bold>{warn}</Text>
       </Text>
     )
 
+    // 한 줄에 여러 항목을 놓기 위한 조각: 아이콘 라벨 막대 백분율 (부가 정보)
+    const seg = (key: string, icon: string, label: string, pct: number, tail: string) => (
+      <Text key={key}>
+        {icon} <Text color={GRAY}>{label}</Text> {bar(pct, FOOT_BAR)} <Text bold color={pctColor(pct)}>{Math.round(pct)}%</Text>
+        <Text dimColor>{tail}</Text>
+      </Text>
+    )
+
     const rows: any[] = []
 
-    const planColor = snap.plan === 'max' ? '#c678dd' : snap.plan === 'pro' ? '#4fc3d9' : GRAY
-
+    // 첫 줄: 모델이 가장 눈에 띄고, 이메일·플랜은 흐리게 맨 끝에 둔다.
     rows.push(
       <Box key="head">
         <Text>
-          {snap.email ? <Text color="#4fc3d9">👤 {snap.email}</Text> : null}
-          {snap.plan ? <Text color={planColor}> ✦ {snap.plan.toUpperCase()}</Text> : null}
-          {snap.email || snap.plan ? <Text color={GRAY}> │ </Text> : null}
           <Text>{modelEmoji(snap.model)} </Text>
           <Text bold color="#5b9bf0">{modelLabel(snap.model)}</Text>
           {snap.effort ? <Text color={EFFORT_COLOR[snap.effort] ?? GRAY}> ⚡{snap.effort.toUpperCase()}</Text> : null}
           <Text color={GRAY}> │ </Text>
           <Text>📁 {snap.dir}</Text>
           {snap.branch ? <Text color="#2bbf6a"> │ 🌿 {snap.branch}</Text> : null}
+          {snap.email || snap.plan ? <Text color={GRAY}> │ </Text> : null}
+          {snap.email ? <Text color={GRAY}>👤 {snap.email}</Text> : null}
+          {snap.plan ? <Text color={GRAY}> ✦ {snap.plan.toUpperCase()}</Text> : null}
         </Text>
       </Box>,
     )
 
-    const segs = []
-
     if (snap.ctxPct !== null) {
-      const tok =
-        snap.ctxTokens !== null ? ` (${formatTokens(snap.ctxTokens)}/${formatTokens(snap.ctxWindow)})` : ''
+      const parts = [
+        snap.ctxTokens !== null ? `${formatTokens(snap.ctxTokens)}/${formatTokens(snap.ctxWindow)}` : '',
+        snap.compactPct !== null ? `${snap.compactPct}%에서 압축` : '',
+      ].filter(Boolean)
       const warn = snap.ctxPct >= 90 ? ' ⚠ 컴팩트 임박' : ''
-      segs.push(seg('ctx', '🧠', 'Context', snap.ctxPct, tok, warn))
+      rows.push(gauge('ctx', '🧠', 'Context', snap.ctxPct, parts.join(' · '), warn))
     }
 
     for (const l of snap.limits) {
       const spec =
-        l.kind === 'five_hour' ? { icon: '⏰', label: '5h' } : l.kind === 'seven_day' ? { icon: '📅', label: '7d' } : null
+        l.kind === 'five_hour' ? { icon: '⏰', label: '5h 한도' } : l.kind === 'seven_day' ? { icon: '📅', label: '7d 한도' } : null
       if (spec === null) continue
       const r = resetIn(l.resetAt, snap.at)
-      segs.push(seg(l.kind, spec.icon, spec.label, l.pct, r ? ` (${r})` : ''))
-    }
-
-    if (segs.length > 0) {
-      const joined: any[] = []
-      segs.forEach((s, i) => {
-        if (i > 0) joined.push(<Text key={`sep${i}`} color={GRAY}> │ </Text>)
-        joined.push(s)
-      })
-      rows.push(<Text key="meters">{joined}</Text>)
-    }
-
-    if (machine !== null) {
-      const ramPct = (machine.ramUsedGb / machine.ramTotalGb) * 100
-      const ramTail = ` (${machine.ramUsedGb.toFixed(1)}/${machine.ramTotalGb.toFixed(1)}G)`
-      rows.push(
-        <Text key="machine">
-          {seg('cpu', '💻', 'CPU', machine.cpuPct, '')}
-          <Text color={GRAY}> │ </Text>
-          {seg('ram', '💾', 'RAM', ramPct, ramTail)}
-        </Text>,
-      )
+      rows.push(gauge(l.kind, spec.icon, spec.label, l.pct, r ? `${r} 초기화` : ''))
     }
 
     // 작업 흐름: 메인의 할 일 진행과 서브에이전트별 상태. 처리 중이거나 서브에이전트가 도는 동안만 나온다.
@@ -724,19 +728,30 @@ export const register: Register = on => {
       if (hidden > 0) rows.push(<Text key="ag-more" dimColor> └ 외 {hidden}개</Text>)
     }
 
-    const tail: string[] = []
+    // 맨 아래 줄: CPU·RAM 게이지와 비용·경과 시간을 한 줄에 모은다.
+    const foot: any[] = []
+    if (machine !== null) {
+      const ramPct = (machine.ramUsedGb / machine.ramTotalGb) * 100
+      foot.push(seg('cpu', '💻', 'CPU', machine.cpuPct, ''))
+      foot.push(seg('ram', '💾', 'RAM', ramPct, ` ${machine.ramUsedGb.toFixed(1)}G`))
+    }
     const isSubscription = snap.limits.length > 0
     if (snap.usd !== null) {
-      tail.push(isSubscription ? `💎 $${snap.usd.toFixed(3)} 상당 (구독 포함)` : `💰 $${snap.usd.toFixed(3)}`)
+      foot.push(
+        <Text key="usd" color={GRAY}>
+          {isSubscription ? `💎 $${snap.usd.toFixed(3)} 상당` : `💰 $${snap.usd.toFixed(3)}`}
+        </Text>,
+      )
     }
     const mins = Math.floor(snap.elapsedMs / 60000)
     const secs = Math.floor((snap.elapsedMs % 60000) / 1000)
-    tail.push(`⏳ ${mins}m ${secs}s`)
-    rows.push(
-      <Text key="tail" color={GRAY}>
-        {tail.join(' │ ')}
-      </Text>,
-    )
+    foot.push(<Text key="time" color={GRAY}>{`⏳ ${mins}m ${secs}s`}</Text>)
+    const footJoined: any[] = []
+    foot.forEach((f, i) => {
+      if (i > 0) footJoined.push(<Text key={`fsep${i}`} color={GRAY}> │ </Text>)
+      footJoined.push(f)
+    })
+    rows.push(<Text key="foot">{footJoined}</Text>)
 
     // 대기 중: 정지한 파란 테두리. 처리 중이 아니어도 작업 흐름이 활성이면(유지 시간 중) 처리 중 모양을 쓴다.
     if (!e.props.isWorking && !flow.animating) {
@@ -809,7 +824,7 @@ const BAND = (isWorking: boolean, bodyColumns = 140) =>
 function stubEngine(
   on: (...args: any[]) => void,
   agents: unknown[],
-  opts: { pct: number; frame: number; model?: string } = { pct: 42, frame: 0 },
+  opts: { pct: number; frame: number; model?: string; compact?: string } = { pct: 42, frame: 0 },
 ) {
   const store: Record<string, unknown> = {}
   let version = 1
@@ -839,7 +854,10 @@ function stubEngine(
       cost: { usd: 1.234 },
     },
   }))
-  on('env.get', (_: unknown, e: any) => ({ value: (e.name ?? e.key) === 'CLAUDE_EFFORT' ? 'high' : '/home' }))
+  on('env.get', (_: unknown, e: any) => {
+    const name = e.name ?? e.key
+    return { value: name === 'CLAUDE_EFFORT' ? 'high' : name === 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE' ? opts.compact : '/home' }
+  })
   on('fs.read', () => ({ value: '{}' }))
   on('settings.read', () => ({ value: {} }))
   on('process.run', (_: unknown, e: any) => ({
@@ -903,6 +921,53 @@ test('대기 중에는 작업 흐름 없이 정지한 기본 테두리만 쓴다
 
   expect(all).not.toContain('🧭 메인')
   expect(all).toContain('Context')
+  await ui.unmount()
+})
+
+test('자동 압축 기준이 설정되어 있으면 Context 옆에 보여 준다', async ($, on) => {
+  stubEngine(on, [], { pct: 42, frame: 0, compact: '50' })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  const ui = await $.ui.mount(BAND(false))
+  const all = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('|')
+
+  expect(all).toContain('50%에서 압축')
+  await ui.unmount()
+})
+
+test('자동 압축 기준이 없거나 1~99 정수가 아니면 보여 주지 않는다', async ($, on) => {
+  stubEngine(on, [], { pct: 42, frame: 0, compact: 'abc' })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  const ui = await $.ui.mount(BAND(false))
+  const all = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('|')
+
+  expect(all).toContain('Context')
+  expect(all).not.toContain('에서 압축')
+  await ui.unmount()
+})
+
+test('게이지는 한 줄에 하나씩, 라벨 칸이 맞고 CPU·RAM·비용·시간은 맨 아래 한 줄에 모인다', async ($, on) => {
+  stubEngine(on, [], { pct: 42, frame: 0 })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  const ui = await $.ui.mount(BAND(false))
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+
+  // 세 게이지 줄은 라벨 시작부터 막대까지 같은 칸 수다(한글은 2칸으로 센다).
+  const barStart = (prefix: string) => {
+    const t = texts.find(x => x.startsWith(prefix))!
+    const label = [...t.slice(t.indexOf(' ') + 1)]
+    const i = label.findIndex(ch => ch === '▌' || ch === '░')
+    return label.slice(0, i).reduce((n, ch) => n + (ch.charCodeAt(0) > 0x2e7f ? 2 : 1), 0)
+  }
+  const starts = ['🧠 Context', '⏰ 5h 한도', '📅 7d 한도'].map(barStart)
+  expect(new Set(starts).size).toBe(1)
+
+  const foot = texts.find(t => t.startsWith('💻 CPU'))!
+  expect(foot).toContain('💾 RAM')
+  expect(foot).toContain('$1.234')
+  expect(foot).toContain('⏳')
   await ui.unmount()
 })
 
@@ -1089,7 +1154,7 @@ test('새 계열의 이모지는 로봇이 아니고, 같은 이름이면 늘 �
 ## 단계 3. 검증
 
 1. `claude plugin validate <MOD_DIR>`를 실행해 주세요. 타입 오류(`error TS`)나 `skipped`, `refus`가 없어야 합니다. README와 LICENSE가 없다는 항목 2건은 공유용 제출 규칙이라 무시해도 됩니다.
-2. `claude plugin test <MOD_DIR>`를 실행해 주세요. 테스트 22건이 모두 통과해야 합니다.
+2. `claude plugin test <MOD_DIR>`를 실행해 주세요. 테스트 25건이 모두 통과해야 합니다.
 3. 실패가 있으면 코드를 임의로 고치지 말고 출력 전체를 보여 주세요.
 
 ## 단계 4. 현재 세션에 바로 적용

@@ -12,7 +12,6 @@
 
 - 첫 줄: 모델 이모지와 모델명(예: Sonnet 5.5), effort, 폴더, git 브랜치(변경 파일 수 `*3`, 올릴 커밋 `↑1`, 받을 커밋 `↓2`는 0이 아닐 때만), 그리고 흐리게 계정 이메일과 구독 종류
 - 둘째~넷째 줄: Context(자동 압축을 설정했다면 압축 기준 %도 함께, "⚠ 컴팩트 임박" 경고는 압축 기준보다 10%p 앞에서, 설정이 없으면 90%부터), 5시간 한도, 7일 한도(사용률이 기간 경과율보다 20%p 이상 앞서면 "⚠ 빠름")를 한 줄에 하나씩, 라벨·막대·%·부가 정보가 세로로 맞게 표시(막대 색이 반 칸 단위로 부드럽게 이어지고, % 숫자는 90% 이상이면 빨강)
-- 작업 중: 메인 할 일 진행(`3/7`)과 서브에이전트별 상태·도구 횟수·경과 시간
 - 테두리: 평소에는 파란색, 작업 중에는 파랑과 보라가 시계 방향으로 흐르며, 응답이 끝난 뒤 3초 동안 유지
 - 마지막 줄: CPU·RAM 막대(10초마다 갱신), 비용, 세션 경과 시간
 
@@ -101,29 +100,8 @@
 ````ts
 export type Limit = { kind: string; pct: number; resetAt: number | null }
 
-export type Todo = { content: string; activeForm: string; status: string }
-
-// 서브에이전트 한 개의 진행 기록. endedAt이 null이면 아직 실행 중이다.
-export type FlowAgent = {
-  id: string
-  type: string
-  desc: string
-  status: string
-  tools: number
-  startedAt: number
-  endedAt: number | null
-}
-
-// 작업 흐름: 메인 할 일 목록과 도구 호출 수, 서브에이전트 목록. active가 false이면 표시하지 않는다.
-export type Flow = {
-  active: boolean
-  animating: boolean
-  at: number
-  startedAt: number
-  todos: Todo[]
-  mainTools: number
-  agents: FlowAgent[]
-}
+// 작업 중 테두리 애니메이션 여부: 처리 중이거나 응답이 끝난 직후 유지 시간 동안 true다.
+export type Flow = { animating: boolean }
 
 export type Machine = { cpuPct: number; ramUsedGb: number; ramTotalGb: number }
 
@@ -158,23 +136,15 @@ declare module 'claude-code' {
 
 ````tsx
 import { atom, read, update } from 'claude-code'
-import type { AgentInfo, EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
 
-import type { Flow, FlowAgent, Limit, Snap, Todo } from '../types'
+import type { Flow, Limit, Snap } from '../types'
 
 const snapAtom = atom({ plugin: 'statusline-band', key: 'snap' } as const, null)
 const machineAtom = atom({ plugin: 'statusline-band', key: 'machine' } as const, null)
 const frameAtom = atom({ plugin: 'statusline-band', key: 'frame' } as const, 0)
 
-const flowAtom = atom({ plugin: 'statusline-band', key: 'flow' } as const, {
-  active: false,
-  animating: false,
-  at: 0,
-  startedAt: 0,
-  todos: [],
-  mainTools: 0,
-  agents: [],
-})
+const flowAtom = atom({ plugin: 'statusline-band', key: 'flow' } as const, { animating: false })
 
 const FRAME_INTERVAL_MS = 200
 const FLOW_EVERY_TICKS = 4 // 작업 흐름은 1초마다 갱신한다
@@ -187,81 +157,20 @@ const BORDER_B = [0xc6, 0x78, 0xdd] // 보라
 
 // 작업 상태. 타이머와 훅이 함께 쓰므로 모듈 변수로 둔다.
 let isWorking = false
-let hasRunning = false
 let lingerTicks = 0 // 응답이 끝난 뒤 작업 상태를 더 유지할 프레임 수
 let engineWorking = false // 마지막으로 그릴 때 엔진이 알려 준 처리 중 여부
 let offTicks = 0
 let flowShown = false
 let tickN = 0
-let startedAt = 0
-let mainTools = 0
-let todos: Todo[] = []
-const agentTools: Record<string, number> = {}
-const agentBook: Record<string, FlowAgent> = {}
 
-function resetFlow() {
-  todos = []
-  mainTools = 0
-  startedAt = 0
-  for (const k of Object.keys(agentTools)) delete agentTools[k]
-  for (const k of Object.keys(agentBook)) delete agentBook[k]
-}
-
-const isLive = (status: string) => status === 'pending' || status === 'running' || status === 'waiting'
-
-// 메인과 서브에이전트의 현재 상태를 모아 화면용 값으로 만든다.
+// 테두리가 도는 상태(처리 중이거나 응답 직후 유지 시간)를 화면용 값으로 내보낸다.
 async function publishFlow($: EngineInterface) {
-  const now = await $.clock.now()
-  if (startedAt === 0) startedAt = now
-
-  let list: AgentInfo[] = []
-  try {
-    list = await $.agent.list()
-  } catch {
-    /* 목록을 못 읽으면 이전 기록을 그대로 쓴다 */
-  }
-
-  const seen: Record<string, true> = {}
-  for (const a of list) {
-    seen[a.id] = true
-    const prev = agentBook[a.id]
-    agentBook[a.id] = {
-      id: a.id,
-      type: a.type,
-      desc: a.description,
-      status: a.status,
-      tools: agentTools[a.id] ?? 0,
-      startedAt: prev?.startedAt ?? now,
-      endedAt: isLive(a.status) ? null : (prev?.endedAt ?? now),
-    }
-  }
-  // 목록에서 사라진 에이전트는 끝난 것으로 본다.
-  for (const b of Object.values(agentBook)) {
-    if (!seen[b.id] && b.endedAt === null) {
-      b.status = 'completed'
-      b.endedAt = now
-    }
-  }
-
-  const agents = Object.values(agentBook)
-  hasRunning = agents.some(a => a.endedAt === null)
   const animating = isWorking || lingerTicks > 0
-  const active = animating || hasRunning
-  flowShown = active
-
-  const flow: Flow = {
-    active,
-    animating,
-    at: now,
-    startedAt,
-    todos: todos.slice(),
-    mainTools,
-    agents: agents.map(a => ({ ...a })),
-  }
-  await update($, flowAtom, () => flow)
+  flowShown = animating
+  await update($, flowAtom, () => ({ animating }))
 }
 
-// 처리 중이거나 서브에이전트가 돌거나 응답 직후 유지 시간인 동안에만 일한다. 둘 다 끝나면 흐름 표시를 한 번 지우고 멈춘다.
+// 처리 중이거나 응답 직후 유지 시간인 동안에만 일한다. 둘 다 끝나면 테두리 상태를 한 번 지우고 멈춘다.
 async function tickFrame($: EngineInterface) {
   tickN += 1
   // 엔진은 처리 중이 아니라는데 내 표시만 켜져 있으면(종료 이벤트를 놓친 경우) 잠시 뒤 끝난 것으로 본다.
@@ -272,11 +181,10 @@ async function tickFrame($: EngineInterface) {
     offTicks = 0
   }
   const animating = isWorking || lingerTicks > 0
-  const busy = animating || hasRunning
-  if (!busy && !flowShown) return
+  if (!animating && !flowShown) return
   if (animating) await update($, frameAtom, n => n + 1)
   if (lingerTicks > 0) lingerTicks -= 1
-  if (tickN % FLOW_EVERY_TICKS === 0 || !busy) await publishFlow($)
+  if (tickN % FLOW_EVERY_TICKS === 0 || !animating) await publishFlow($)
 }
 
 // 테두리 상자의 크기(칸 수). 위치는 둘레를 따라 시계 방향으로 잰 거리로 나타낸다.
@@ -314,12 +222,6 @@ function borderSegments(
   }
   return out
 }
-
-const fmtTime = (ms: number) => {
-  const s = Math.max(0, Math.floor(ms / 1000))
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
-}
-const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
 
 // 한글 같은 전각 글자는 2칸으로 세어, 게이지 라벨을 같은 칸 수에 맞춘다.
 const LABEL_CELLS = 7
@@ -597,30 +499,11 @@ export const register: Register = on => {
   // 대기열 입력에도 발생해 끝 이벤트 없이 켜진 채 남을 수 있어 쓰지 않는다.
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
-      resetFlow()
       lingerTicks = 0
       offTicks = 0
       engineWorking = true // 시작 직후 엔진 표시가 따라올 때까지 잠시 기다린다
       isWorking = true
       await publishFlow($)
-    }
-    return next(e)
-  })
-
-  // 메인과 서브에이전트 각각의 도구 호출 수를 세고, 메인의 할 일 목록을 기억한다.
-  on('tool.call', ($, e, next) => {
-    const x = e as any
-    if (x.agentId) {
-      agentTools[x.agentId] = (agentTools[x.agentId] ?? 0) + 1
-    } else {
-      mainTools += 1
-      if (x.tool === 'TodoWrite' && Array.isArray(x.todos)) {
-        todos = x.todos.map((t: { content?: string; activeForm?: string; status?: string }) => ({
-          content: String(t.content ?? ''),
-          activeForm: String(t.activeForm ?? t.content ?? ''),
-          status: String(t.status ?? 'pending'),
-        }))
-      }
     }
     return next(e)
   })
@@ -726,40 +609,6 @@ export const register: Register = on => {
       if (spec === null) continue
       const r = resetIn(l.resetAt, snap.at)
       rows.push(gauge(l.kind, spec.icon, spec.label, l.pct, r ? `${r} 초기화` : '', paceWarn(l.kind, l.pct, l.resetAt, snap.at)))
-    }
-
-    // 작업 흐름: 메인의 할 일 진행과 서브에이전트별 상태. 처리 중이거나 서브에이전트가 도는 동안만 나온다.
-    if (flow.active) {
-      const done = flow.todos.filter(t => t.status === 'completed').length
-      const total = flow.todos.length
-      const current = flow.todos.find(t => t.status === 'in_progress')
-
-      rows.push(
-        <Text key="flow-main">
-          <Text bold>🧭 메인 </Text>
-          {total > 0 ? bar((done / total) * 100) : null}
-          {total > 0 ? <Text color={gradient(done / total)}> {done}/{total}</Text> : <Text dimColor>단계 정보 없음</Text>}
-          <Text dimColor> · 도구 {flow.mainTools}회 · {fmtTime(flow.at - flow.startedAt)}</Text>
-          {current ? <Text color="#e6b83e"> ▸ {clip(current.activeForm, 28)}</Text> : null}
-        </Text>,
-      )
-
-      const shown = flow.agents.slice(-4)
-      const hidden = flow.agents.length - shown.length
-      shown.forEach((a, i) => {
-        const live = a.endedAt === null
-        const icon = live ? '▸' : a.status === 'completed' ? '✔' : a.status === 'idle' ? '…' : '✘'
-        const color = live ? '#4fc3d9' : a.status === 'completed' ? '#2bbf6a' : a.status === 'idle' ? GRAY : '#e04444'
-        const isLast = hidden === 0 && i === shown.length - 1
-        rows.push(
-          <Text key={`ag-${a.id}`}>
-            <Text color={GRAY}>{isLast ? ' └ ' : ' ├ '}</Text>
-            <Text color={color}>{icon} {a.type}</Text>
-            <Text dimColor> {clip(a.desc, 24)} · 도구 {a.tools}회 · {fmtTime((a.endedAt ?? flow.at) - a.startedAt)}</Text>
-          </Text>,
-        )
-      })
-      if (hidden > 0) rows.push(<Text key="ag-more" dimColor> └ 외 {hidden}개</Text>)
     }
 
     // 맨 아래 줄: CPU·RAM 게이지와 비용·경과 시간을 한 줄에 모은다.
@@ -915,7 +764,7 @@ const AGENTS = [
   { id: 'a2', type: 'Plan', description: '구현 계획 수립', status: 'running' },
 ]
 
-test('처리 중 밴드에 헤더, 한도, 작업 흐름, 무지개 테두리가 모두 그려진다', async ($, on) => {
+test('처리 중 밴드에 헤더, 한도, 도는 테두리가 그려지고 작업 흐름은 나오지 않는다', async ($, on) => {
   stubEngine(on, AGENTS)
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
@@ -938,11 +787,7 @@ test('처리 중 밴드에 헤더, 한도, 작업 흐름, 무지개 테두리가
 
   expect(all).toContain('Sonnet 5.5')
   expect(all).not.toContain('claude-sonnet')
-  expect(all).toContain('🧭 메인')
-  expect(all).toContain('1/3')
-  expect(all).toContain('구현 중')
-  expect(all).toContain('Plan')
-  expect(all).toContain('Explore')
+  for (const s of ['🧭 메인', '1/3', '구현 중', 'Plan', 'Explore']) expect(all).not.toContain(s)
   expect(all).toContain('╭')
   expect(all).toContain('╯')
   await ui.unmount()
@@ -1124,7 +969,7 @@ test('색은 위쪽은 오른쪽으로, 오른쪽은 아래로, 아래쪽은 왼
   expect(head(fr[6]!.bottom)).toBeLessThan(head(fr[5]!.bottom))
 })
 
-test('응답이 끝나도 유지 시간 동안은 작업 상태(도는 테두리, 작업 흐름)가 남는다', async ($, on) => {
+test('응답이 끝나도 유지 시간 동안은 도는 테두리가 남는다', async ($, on) => {
   // 서브에이전트가 없어도, 엔진은 이미 처리 중이 아니라고(isWorking=false) 알린다.
   stubEngine(on, [])
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
@@ -1133,7 +978,7 @@ test('응답이 끝나도 유지 시간 동안은 작업 상태(도는 테두리
 
   const ui = await $.ui.mount(BAND(false))
   const texts = (await ui.findAll({ type: 'Text' })).map(e => e.text).join('|')
-  expect(texts).toContain('🧭 메인')
+  expect(texts).not.toContain('🧭 메인')
   expect(texts).toContain('╭')
   const edges = ((await ui.findAll({ type: 'Text', text: /^[╭╮╰╯─]+$/ })) as any[]).filter(e => e.props?.color)
   expect(edges.some(e => String(e.props.color) !== '#5b9bf0')).toBe(true)

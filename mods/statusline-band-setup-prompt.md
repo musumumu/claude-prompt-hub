@@ -1168,7 +1168,7 @@ test('새 계열의 이모지는 로봇이 아니고, 같은 이름이면 늘 �
 
 ## 단계 3. 검증
 
-1. `claude plugin validate <MOD_DIR>`를 실행해 주세요. 타입 오류(`error TS`)나 `skipped`, `refus`가 없어야 합니다. README와 LICENSE가 없다는 항목 2건은 공유용 제출 규칙이라 무시해도 됩니다.
+1. `claude plugin validate <MOD_DIR>`를 실행해 주세요. 타입 오류(`error TS`)나 `skipped`가 없어야 합니다. README와 LICENSE가 없다는 항목 2건은 공유용 제출 규칙이라 무시해도 됩니다. 이 2건은 출력에 "refuses a submission"이라는 문장과 함께 나오지만 같은 이유이므로 함께 무시하세요.
 2. `claude plugin test <MOD_DIR>`를 실행해 주세요. 테스트 30건이 모두 통과해야 합니다.
 3. 실패가 있으면 코드를 임의로 고치지 말고 출력 전체를 보여 주세요.
 

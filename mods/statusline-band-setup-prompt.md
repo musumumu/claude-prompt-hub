@@ -147,7 +147,7 @@ const frameAtom = atom({ plugin: 'statusline-band', key: 'frame' } as const, 0)
 const flowAtom = atom({ plugin: 'statusline-band', key: 'flow' } as const, { animating: false })
 
 const FRAME_INTERVAL_MS = 200
-const FLOW_EVERY_TICKS = 4 // 작업 흐름은 1초마다 갱신한다
+const FLOW_EVERY_TICKS = 4 // 테두리 상태는 1초마다 갱신한다
 const LINGER_MS = 3000 // 응답이 끝난 뒤에도 작업 상태를 유지하는 시간
 const STUCK_TICKS = 10 // 엔진은 처리 중이 아닌데 내 표시만 이만큼 켜져 있으면 끝난 것으로 본다(2초)
 const BORDER_SEG = 6 // 테두리를 이 글자 수 단위로 묶어 한 색으로 칠해 요소 수를 줄인다
@@ -636,7 +636,7 @@ export const register: Register = on => {
     })
     rows.push(<Text key="foot">{footJoined}</Text>)
 
-    // 대기 중: 정지한 파란 테두리. 처리 중이 아니어도 작업 흐름이 활성이면(유지 시간 중) 처리 중 모양을 쓴다.
+    // 대기 중: 정지한 파란 테두리. 처리 중이 아니어도 응답 직후 유지 시간(flow.animating) 중이면 처리 중 모양을 쓴다.
     if (!e.props.isWorking && !flow.animating) {
       return (
         <Box flexDirection="column" borderStyle="round" borderColor="#5b9bf0" paddingX={1}>
@@ -706,7 +706,6 @@ const BAND = (isWorking: boolean, bodyColumns = 140) =>
 // 엔진 아래층을 흉내 낸다: 상태는 메모리에, 나머지 호출은 고정 값으로 답한다.
 function stubEngine(
   on: (...args: any[]) => void,
-  agents: unknown[],
   opts: { pct: number; frame: number; model?: string; compact?: string; git?: string; five?: number; seven?: number } = {
     pct: 42,
     frame: 0,
@@ -753,32 +752,15 @@ function stubEngine(
       stderr: '',
     },
   }))
-  on('agent.list', () => ({ value: agents }))
   on('turn.start', () => ({ turnId: 't1' }))
-  on('tool.call', () => ({ result: {} }))
   on('turn.complete', () => ({ text: '' }))
 }
 
-const AGENTS = [
-  { id: 'a1', type: 'Explore', description: '코드베이스 조사', status: 'completed' },
-  { id: 'a2', type: 'Plan', description: '구현 계획 수립', status: 'running' },
-]
-
 test('처리 중 밴드에 헤더, 한도, 도는 테두리가 그려지고 작업 흐름은 나오지 않는다', async ($, on) => {
-  stubEngine(on, AGENTS)
+  stubEngine(on)
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.turn.start({ text: '작업 시작', turnId: 't1' } as any)
-  await $.tool.call({
-    tool: 'TodoWrite',
-    todos: [
-      { content: '조사', activeForm: '조사 중', status: 'completed' },
-      { content: '구현', activeForm: '구현 중', status: 'in_progress' },
-      { content: '검증', activeForm: '검증 중', status: 'pending' },
-    ],
-  })
-  // 서브에이전트가 부른 도구는 그 에이전트 몫으로 센다.
-  await $.tool.call({ tool: 'Read', file_path: '/a', agentId: 'a2' } as any)
   await $.turn.complete({} as any)
 
   const ui = await $.ui.mount(BAND(true))
@@ -787,14 +769,14 @@ test('처리 중 밴드에 헤더, 한도, 도는 테두리가 그려지고 작�
 
   expect(all).toContain('Sonnet 5.5')
   expect(all).not.toContain('claude-sonnet')
-  for (const s of ['🧭 메인', '1/3', '구현 중', 'Plan', 'Explore']) expect(all).not.toContain(s)
+  expect(all).not.toContain('🧭 메인')
   expect(all).toContain('╭')
   expect(all).toContain('╯')
   await ui.unmount()
 })
 
 test('대기 중에는 작업 흐름 없이 정지한 기본 테두리만 쓴다', async ($, on) => {
-  stubEngine(on, [])
+  stubEngine(on)
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
@@ -807,7 +789,7 @@ test('대기 중에는 작업 흐름 없이 정지한 기본 테두리만 쓴다
 })
 
 test('자동 압축 기준이 설정되어 있으면 Context 옆에 보여 준다', async ($, on) => {
-  stubEngine(on, [], { pct: 42, frame: 0, compact: '50' })
+  stubEngine(on, { pct: 42, frame: 0, compact: '50' })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
   const ui = await $.ui.mount(BAND(false))
@@ -819,7 +801,7 @@ test('자동 압축 기준이 설정되어 있으면 Context 옆에 보여 준�
 
 for (const bad of ['abc', '0', '100', '', undefined]) {
   test(`자동 압축 기준이 ${JSON.stringify(bad)}이면(1~99 정수가 아니면) 보여 주지 않는다`, async ($, on) => {
-    stubEngine(on, [], { pct: 42, frame: 0, compact: bad })
+    stubEngine(on, { pct: 42, frame: 0, compact: bad })
     await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
     const ui = await $.ui.mount(BAND(false))
@@ -842,7 +824,7 @@ for (const c of [
   { compact: '5', pct: 1, show: true },
 ]) {
   test(`컴팩트 임박 경고: 압축 기준 ${c.compact ?? '없음'}, Context ${c.pct}% → ${c.show ? '표시' : '숨김'}`, async ($, on) => {
-    stubEngine(on, [], { pct: c.pct, frame: 0, compact: c.compact })
+    stubEngine(on, { pct: c.pct, frame: 0, compact: c.compact })
     await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
     const ui = await $.ui.mount(BAND(false))
@@ -855,7 +837,7 @@ for (const c of [
 }
 
 test('맨 아래 줄의 CPU·RAM 막대는 5칸이다', async ($, on) => {
-  stubEngine(on, [], { pct: 42, frame: 0 })
+  stubEngine(on, { pct: 42, frame: 0 })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
   const ui = await $.ui.mount(BAND(false))
@@ -868,7 +850,7 @@ test('맨 아래 줄의 CPU·RAM 막대는 5칸이다', async ($, on) => {
 })
 
 test('게이지는 한 줄에 하나씩, 라벨 칸이 맞고 CPU·RAM·비용·시간은 맨 아래 한 줄에 모인다', async ($, on) => {
-  stubEngine(on, [], { pct: 42, frame: 0 })
+  stubEngine(on, { pct: 42, frame: 0 })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
   const ui = await $.ui.mount(BAND(false))
@@ -893,7 +875,7 @@ test('게이지는 한 줄에 하나씩, 라벨 칸이 맞고 CPU·RAM·비용·
 
 test('모든 막대는 어떤 백분율에서도 8칸이다', async ($, on) => {
   const opts = { pct: 0, frame: 0 }
-  stubEngine(on, [], opts)
+  stubEngine(on, opts)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
   for (const pct of [0, 1, 12, 49, 50, 99, 100]) {
@@ -912,7 +894,7 @@ test('모든 막대는 어떤 백분율에서도 8칸이다', async ($, on) => {
 const BASE_RED = 0x5b
 async function borderCells($: any, on: any, frames: number[], width = 140) {
   const opts = { pct: 42, frame: 0 }
-  stubEngine(on, AGENTS, opts)
+  stubEngine(on, opts)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.turn.start({ text: '시작', turnId: 't1' } as any)
   await $.turn.complete({ answer: '', text: '', reason: 'end_turn' } as any)
@@ -970,8 +952,8 @@ test('색은 위쪽은 오른쪽으로, 오른쪽은 아래로, 아래쪽은 왼
 })
 
 test('응답이 끝나도 유지 시간 동안은 도는 테두리가 남는다', async ($, on) => {
-  // 서브에이전트가 없어도, 엔진은 이미 처리 중이 아니라고(isWorking=false) 알린다.
-  stubEngine(on, [])
+  // 엔진은 이미 처리 중이 아니라고(isWorking=false) 알린다.
+  stubEngine(on)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.turn.start({ text: '시작', turnId: 't1' } as any)
   await $.turn.complete({ answer: '', text: '', reason: 'end_turn' } as any)
@@ -987,7 +969,7 @@ test('응답이 끝나도 유지 시간 동안은 도는 테두리가 남는다'
 
 test('가득 찬 막대의 색은 반 칸 단위로 부드럽게 이어진다', async ($, on) => {
   const opts = { pct: 100, frame: 0 }
-  stubEngine(on, [], opts)
+  stubEngine(on, opts)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
   const ui = await $.ui.mount(BAND(false))
@@ -1026,7 +1008,7 @@ for (const [raw, label] of [
   ['gpt-5', 'gpt-5'],
 ] as const) {
   test(`모델 이름 ${raw} → ${label}`, async ($, on) => {
-    stubEngine(on, [], { pct: 42, frame: 0, model: raw })
+    stubEngine(on, { pct: 42, frame: 0, model: raw })
     await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
     const ui = await $.ui.mount(BAND(false))
@@ -1038,7 +1020,7 @@ for (const [raw, label] of [
 
 test('새 계열의 이모지는 로봇이 아니고, 같은 이름이면 늘 같다', async ($, on) => {
   const emojiOf = async (model: string) => {
-    stubEngine(on, [], { pct: 42, frame: 0, model })
+    stubEngine(on, { pct: 42, frame: 0, model })
     await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
     const ui = await $.ui.mount(BAND(false))
     const names = (await ui.findAll({ type: 'Text' })).map(e => e.text)
@@ -1064,7 +1046,7 @@ for (const c of [
   { name: '서버 브랜치 없음', git: '## feat\n', has: ['🌿 feat'], not: ['*', '↑', '↓'] },
 ]) {
   test(`git 표시: ${c.name}`, async ($, on) => {
-    stubEngine(on, [], { pct: 42, frame: 0, git: c.git })
+    stubEngine(on, { pct: 42, frame: 0, git: c.git })
     await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
     const ui = await $.ui.mount(BAND(false))
@@ -1085,7 +1067,7 @@ for (const c of [
   { five: 12, seven: 70, show: true },
 ]) {
   test(`한도 페이스 경고: 5h ${c.five}%, 7d ${c.seven}% → ${c.show ? '표시' : '숨김'}`, async ($, on) => {
-    stubEngine(on, [], { pct: 42, frame: 0, five: c.five, seven: c.seven })
+    stubEngine(on, { pct: 42, frame: 0, five: c.five, seven: c.seven })
     await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
     const ui = await $.ui.mount(BAND(false))

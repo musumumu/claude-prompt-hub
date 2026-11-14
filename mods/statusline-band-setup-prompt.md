@@ -10,8 +10,8 @@
 
 입력창 위 밴드(`AbovePrompt`)에 상태 표시줄을 그리는 mod입니다. 표시 내용은 다음과 같습니다.
 
-- 첫 줄: 모델 이모지와 모델명(예: Sonnet 5.5), effort, 폴더, git 브랜치, 그리고 흐리게 계정 이메일과 구독 종류
-- 둘째~넷째 줄: Context(자동 압축을 설정했다면 압축 기준 %도 함께, "⚠ 컴팩트 임박" 경고는 압축 기준보다 10%p 앞에서, 설정이 없으면 90%부터), 5시간 한도, 7일 한도를 한 줄에 하나씩, 라벨·막대·%·부가 정보가 세로로 맞게 표시(막대 색이 반 칸 단위로 부드럽게 이어지고, % 숫자는 90% 이상이면 빨강)
+- 첫 줄: 모델 이모지와 모델명(예: Sonnet 5.5), effort, 폴더, git 브랜치(변경 파일 수 `*3`, 올릴 커밋 `↑1`, 받을 커밋 `↓2`는 0이 아닐 때만), 그리고 흐리게 계정 이메일과 구독 종류
+- 둘째~넷째 줄: Context(자동 압축을 설정했다면 압축 기준 %도 함께, "⚠ 컴팩트 임박" 경고는 압축 기준보다 10%p 앞에서, 설정이 없으면 90%부터), 5시간 한도, 7일 한도(사용률이 기간 경과율보다 20%p 이상 앞서면 "⚠ 빠름")를 한 줄에 하나씩, 라벨·막대·%·부가 정보가 세로로 맞게 표시(막대 색이 반 칸 단위로 부드럽게 이어지고, % 숫자는 90% 이상이면 빨강)
 - 작업 중: 메인 할 일 진행(`3/7`)과 서브에이전트별 상태·도구 횟수·경과 시간
 - 테두리: 평소에는 파란색, 작업 중에는 파랑과 보라가 시계 방향으로 흐르며, 응답이 끝난 뒤 3초 동안 유지
 - 마지막 줄: CPU·RAM 막대(10초마다 갱신), 비용, 세션 경과 시간
@@ -134,6 +134,9 @@ export type Snap = {
   effort: string | null
   dir: string
   branch: string
+  dirty: number
+  ahead: number
+  behind: number
   ctxPct: number | null
   ctxTokens: number | null
   ctxWindow: number
@@ -491,6 +494,31 @@ async function compactThreshold($: EngineInterface): Promise<number | null> {
   return Number.isInteger(v) && v >= 1 && v <= 99 ? v : null
 }
 
+// `git status --porcelain -b` 출력에서 브랜치, 변경 파일 수, 올릴·받을 커밋 수를 읽는다.
+// 첫 줄은 "## main...origin/main [ahead 1, behind 2]" 꼴이고, 나머지 줄은 변경된 파일(추적 안 되는 파일 포함) 하나씩이다.
+function parseGit(out: string): { branch: string; dirty: number; ahead: number; behind: number } {
+  const lines = out.split(/\r?\n/).filter(Boolean)
+  const head = lines[0]?.startsWith('## ') ? lines[0].slice(3) : ''
+  const name = head.split('...')[0]!.replace(/^(No commits yet on|Initial commit on) /, '').trim()
+  return {
+    branch: name.startsWith('HEAD (no branch)') ? '' : name,
+    dirty: lines.filter(l => !l.startsWith('## ')).length,
+    ahead: Number(head.match(/ahead (\d+)/)?.[1] ?? 0),
+    behind: Number(head.match(/behind (\d+)/)?.[1] ?? 0),
+  }
+}
+
+const WINDOW_MS: Record<string, number> = { five_hour: 5 * 3600_000, seven_day: 7 * 86400_000 }
+const PACE_MARGIN = 20 // 한도 사용률이 기간 경과율보다 이만큼(%p) 앞서면 "빠름"으로 알린다
+
+// 한도 기간이 지난 비율(경과율)보다 사용률이 많이 앞서면, 이 속도로는 기간이 끝나기 전에 한도가 찬다는 뜻이다.
+function paceWarn(kind: string, pct: number, resetAt: number | null, now: number): string {
+  const win = WINDOW_MS[kind]
+  if (win === undefined || resetAt === null) return ''
+  const elapsedPct = Math.max(0, Math.min(100, (1 - (resetAt - now) / win) * 100))
+  return pct - elapsedPct >= PACE_MARGIN ? ' ⚠ 빠름' : ''
+}
+
 // /model, /effort는 응답 없이 바뀌므로 짧은 주기로 두 값만 확인해 바뀌었을 때만 고친다.
 async function refreshHead($: EngineInterface) {
   const snap = await read($, snapAtom)
@@ -509,10 +537,10 @@ async function refresh($: EngineInterface) {
   const acc = await loadAccount($)
   const effort = await currentEffort($, model)
 
-  let branch = ''
+  let git = { branch: '', dirty: 0, ahead: 0, behind: 0 }
   try {
-    const r = await $.process.run(['git', 'branch', '--show-current'], { cwd, timeoutMs: 3000 })
-    if (r.exitCode === 0) branch = r.stdout.trim()
+    const r = await $.process.run(['git', 'status', '--porcelain', '-b'], { cwd, timeoutMs: 3000 })
+    if (r.exitCode === 0) git = parseGit(r.stdout)
   } catch {
     /* git 저장소가 아니거나 git이 없는 경우 */
   }
@@ -529,7 +557,7 @@ async function refresh($: EngineInterface) {
     model,
     effort,
     dir: cwd.split(/[\\/]/).filter(Boolean).pop() ?? cwd,
-    branch,
+    ...git,
     ctxPct: usage.context.percent ?? null,
     ctxTokens: usage.context.tokens ?? null,
     ctxWindow: usage.context.window,
@@ -672,6 +700,9 @@ export const register: Register = on => {
           <Text color={GRAY}> │ </Text>
           <Text>📁 {snap.dir}</Text>
           {snap.branch ? <Text color="#2bbf6a"> │ 🌿 {snap.branch}</Text> : null}
+          {snap.dirty > 0 ? <Text color="#e6b83e">{` *${snap.dirty}`}</Text> : null}
+          {snap.ahead > 0 ? <Text color="#4fc3d9">{` ↑${snap.ahead}`}</Text> : null}
+          {snap.behind > 0 ? <Text color="#e6b83e">{` ↓${snap.behind}`}</Text> : null}
           {snap.email || snap.plan ? <Text color={GRAY}> │ </Text> : null}
           {snap.email ? <Text color={GRAY}>👤 {snap.email}</Text> : null}
           {snap.plan ? <Text color={GRAY}> ✦ {snap.plan.toUpperCase()}</Text> : null}
@@ -694,7 +725,7 @@ export const register: Register = on => {
         l.kind === 'five_hour' ? { icon: '⏰', label: '5h 한도' } : l.kind === 'seven_day' ? { icon: '📅', label: '7d 한도' } : null
       if (spec === null) continue
       const r = resetIn(l.resetAt, snap.at)
-      rows.push(gauge(l.kind, spec.icon, spec.label, l.pct, r ? `${r} 초기화` : ''))
+      rows.push(gauge(l.kind, spec.icon, spec.label, l.pct, r ? `${r} 초기화` : '', paceWarn(l.kind, l.pct, l.resetAt, snap.at)))
     }
 
     // 작업 흐름: 메인의 할 일 진행과 서브에이전트별 상태. 처리 중이거나 서브에이전트가 도는 동안만 나온다.
@@ -827,7 +858,10 @@ const BAND = (isWorking: boolean, bodyColumns = 140) =>
 function stubEngine(
   on: (...args: any[]) => void,
   agents: unknown[],
-  opts: { pct: number; frame: number; model?: string; compact?: string } = { pct: 42, frame: 0 },
+  opts: { pct: number; frame: number; model?: string; compact?: string; git?: string; five?: number; seven?: number } = {
+    pct: 42,
+    frame: 0,
+  },
 ) {
   const store: Record<string, unknown> = {}
   let version = 1
@@ -851,8 +885,8 @@ function stubEngine(
       startedAt: 1_000_000,
       context: { window: 200000, tokens: 84000, percent: opts.pct },
       rateLimits: [
-        { kind: 'five_hour', percentUsed: 12, resetsAt: new Date(1_000_000 + 3 * 3600_000).toISOString() },
-        { kind: 'seven_day', percentUsed: 30, resetsAt: new Date(1_000_000 + 4 * 86400_000).toISOString() },
+        { kind: 'five_hour', percentUsed: opts.five ?? 12, resetsAt: new Date(1_000_000 + 3 * 3600_000).toISOString() },
+        { kind: 'seven_day', percentUsed: opts.seven ?? 30, resetsAt: new Date(1_000_000 + 4 * 86400_000).toISOString() },
       ],
       cost: { usd: 1.234 },
     },
@@ -866,7 +900,7 @@ function stubEngine(
   on('process.run', (_: unknown, e: any) => ({
     value: {
       exitCode: 0,
-      stdout: e.argv[0] === 'git' ? 'main\n' : '{"cpu":16,"total":16000000,"free":6000000}',
+      stdout: e.argv[0] === 'git' ? (opts.git ?? '## main...origin/main\n') : '{"cpu":16,"total":16000000,"free":6000000}',
       stderr: '',
     },
   }))
@@ -1171,6 +1205,52 @@ test('새 계열의 이모지는 로봇이 아니고, 같은 이름이면 늘 �
   expect(a).not.toContain('🤖')
   expect(a).not.toContain('🎻')
 })
+
+// 첫 줄의 git 표시: 브랜치 뒤에 변경 파일 수(*), 올릴 커밋(↑), 받을 커밋(↓)이 0이 아닐 때만 붙는다.
+for (const c of [
+  { name: '깨끗하고 서버와 같음', git: '## main...origin/main\n', has: ['🌿 main'], not: ['*', '↑', '↓'] },
+  {
+    name: '변경 3개, 올릴 커밋 1개',
+    git: '## main...origin/main [ahead 1]\n M a.ts\n?? b.ts\n M c.ts\n',
+    has: ['🌿 main', '*3', '↑1'],
+    not: ['↓'],
+  },
+  { name: '올릴 1개, 받을 2개', git: '## main...origin/main [ahead 1, behind 2]\n', has: ['↑1', '↓2'], not: ['*'] },
+  { name: '서버 브랜치 없음', git: '## feat\n', has: ['🌿 feat'], not: ['*', '↑', '↓'] },
+]) {
+  test(`git 표시: ${c.name}`, async ($, on) => {
+    stubEngine(on, [], { pct: 42, frame: 0, git: c.git })
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+    const ui = await $.ui.mount(BAND(false))
+    const all = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('|')
+
+    for (const s of c.has) expect(all).toContain(s)
+    for (const s of c.not) expect(all).not.toContain(s)
+    await ui.unmount()
+  })
+}
+
+// 5시간 한도는 3시간 뒤 초기화(경과율 약 40%), 7일 한도는 4일 뒤 초기화(경과율 약 43%)로 고정되어 있다.
+// 사용률이 경과율보다 20%p 이상 앞서면 "빠름"을 알린다.
+for (const c of [
+  { five: 12, seven: 30, show: false },
+  { five: 55, seven: 30, show: false },
+  { five: 65, seven: 30, show: true },
+  { five: 12, seven: 70, show: true },
+]) {
+  test(`한도 페이스 경고: 5h ${c.five}%, 7d ${c.seven}% → ${c.show ? '표시' : '숨김'}`, async ($, on) => {
+    stubEngine(on, [], { pct: 42, frame: 0, five: c.five, seven: c.seven })
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+    const ui = await $.ui.mount(BAND(false))
+    const all = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('|')
+
+    if (c.show) expect(all).toContain('빠름')
+    else expect(all).not.toContain('빠름')
+    await ui.unmount()
+  })
+}
 ````
 
 ## 단계 2. 설정 파일 수정
@@ -1195,7 +1275,7 @@ test('새 계열의 이모지는 로봇이 아니고, 같은 이름이면 늘 �
 ## 단계 3. 검증
 
 1. `claude plugin validate <MOD_DIR>`를 실행해 주세요. 타입 오류(`error TS`)나 `skipped`가 없어야 합니다. README와 LICENSE가 없다는 항목 2건은 공유용 제출 규칙이라 무시해도 됩니다. 이 2건은 출력에 "refuses a submission"이라는 문장과 함께 나오지만 같은 이유이므로 함께 무시하세요.
-2. `claude plugin test <MOD_DIR>`를 실행해 주세요. 테스트 36건이 모두 통과해야 합니다.
+2. `claude plugin test <MOD_DIR>`를 실행해 주세요. 테스트 44건이 모두 통과해야 합니다.
 3. 실패가 있으면 코드를 임의로 고치지 말고 출력 전체를 보여 주세요.
 
 ## 단계 4. 현재 세션에 바로 적용
@@ -1215,4 +1295,6 @@ Claude는 슬래시 명령을 직접 실행할 수 없으므로, 아래처럼 �
 - **계정 이메일 표시**: 첫 줄에 로그인한 계정의 이메일이 그대로 보입니다. 화면을 공유하거나 캡처할 때 주의해 주세요.
 - **밴드 폭**: 터미널 폭이 약 110칸보다 좁으면 줄이 넘칠 수 있습니다.
 - **구독이 아닌 세션**: 5시간·7일 한도 정보가 없으면 두 막대는 나오지 않고 Context만 표시됩니다.
+- **git 표시**: `git status --porcelain -b`로 읽으므로 추적되지 않는 새 파일도 변경 파일 수(`*`)에 들어갑니다. git 저장소가 아니면 브랜치와 함께 모두 빠집니다. 서버(upstream) 브랜치가 없으면 `↑`·`↓`도 나오지 않습니다.
+- **한도 페이스 경고**: 5시간·7일 한도에서 "기간이 지난 비율"보다 사용률이 20%p 이상 앞서면 `⚠ 빠름`이 붙습니다(예: 5시간 중 2시간이 지났는데 60% 사용). 초기화 시각 정보가 없으면 표시하지 않습니다.
 - **낮은 압축 기준**: "⚠ 컴팩트 임박" 경고는 압축 기준보다 10%p 앞에서 뜹니다. 기준을 11% 이하로 두면 경고 시작점이 1%로 묶여서 Context 1%부터 경고가 계속 보입니다.

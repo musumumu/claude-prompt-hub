@@ -11,7 +11,7 @@
 입력창 위 밴드(`AbovePrompt`)에 상태 표시줄을 그리는 mod입니다. 표시 내용은 다음과 같습니다.
 
 - 첫 줄: 모델 이모지와 모델명(예: Sonnet 5.5), effort, 폴더, git 브랜치, 그리고 흐리게 계정 이메일과 구독 종류
-- 둘째~넷째 줄: Context(자동 압축을 설정했다면 압축 기준 %도 함께), 5시간 한도, 7일 한도를 한 줄에 하나씩, 라벨·막대·%·부가 정보가 세로로 맞게 표시(막대 색이 반 칸 단위로 부드럽게 이어지고, 90% 이상은 빨강)
+- 둘째~넷째 줄: Context(자동 압축을 설정했다면 압축 기준 %도 함께), 5시간 한도, 7일 한도를 한 줄에 하나씩, 라벨·막대·%·부가 정보가 세로로 맞게 표시(막대 색이 반 칸 단위로 부드럽게 이어지고, % 숫자는 90% 이상이면 빨강)
 - 작업 중: 메인 할 일 진행(`3/7`)과 서브에이전트별 상태·도구 횟수·경과 시간
 - 테두리: 평소에는 파란색, 작업 중에는 파랑과 보라가 시계 방향으로 흐르며, 응답이 끝난 뒤 3초 동안 유지
 - 마지막 줄: CPU·RAM 막대(10초마다 갱신), 비용, 세션 경과 시간
@@ -61,7 +61,7 @@
 
 **질문 1**
 - 질문: "컨텍스트가 일정 비율에 도달하면 자동 압축하도록 설정할까요?"
-- 선택지 1: **설정함** — 다음 질문에서 비율을 고릅니다
+- 선택지 1: **설정함** — 다음 질문에서 비율을 숫자로 입력합니다
 - 선택지 2: **설정 안 함** — 이 설정은 건드리지 않습니다 (기존 값이 있으면 그대로 유지)
 
 **질문 2** (질문 1에서 "설정함"을 고른 경우에만)
@@ -935,15 +935,30 @@ test('자동 압축 기준이 설정되어 있으면 Context 옆에 보여 준�
   await ui.unmount()
 })
 
-test('자동 압축 기준이 없거나 1~99 정수가 아니면 보여 주지 않는다', async ($, on) => {
-  stubEngine(on, [], { pct: 42, frame: 0, compact: 'abc' })
+for (const bad of ['abc', '0', '100', '', undefined]) {
+  test(`자동 압축 기준이 ${JSON.stringify(bad)}이면(1~99 정수가 아니면) 보여 주지 않는다`, async ($, on) => {
+    stubEngine(on, [], { pct: 42, frame: 0, compact: bad })
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+    const ui = await $.ui.mount(BAND(false))
+    const all = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('|')
+
+    expect(all).toContain('Context')
+    expect(all).not.toContain('에서 압축')
+    await ui.unmount()
+  })
+}
+
+test('맨 아래 줄의 CPU·RAM 막대는 5칸이다', async ($, on) => {
+  stubEngine(on, [], { pct: 42, frame: 0 })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
   const ui = await $.ui.mount(BAND(false))
-  const all = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('|')
+  const foot = (await ui.findAll({ type: 'Text' })).map(t => t.text).find(t => t.startsWith('💻 CPU'))!
+  const barOf = (label: string) => foot.slice(foot.indexOf(label) + label.length).split(' ')[0]!
 
-  expect(all).toContain('Context')
-  expect(all).not.toContain('에서 압축')
+  expect([...barOf('💻 CPU ')].length).toBe(5)
+  expect([...barOf('💾 RAM ')].length).toBe(5)
   await ui.unmount()
 })
 
@@ -1154,7 +1169,7 @@ test('새 계열의 이모지는 로봇이 아니고, 같은 이름이면 늘 �
 ## 단계 3. 검증
 
 1. `claude plugin validate <MOD_DIR>`를 실행해 주세요. 타입 오류(`error TS`)나 `skipped`, `refus`가 없어야 합니다. README와 LICENSE가 없다는 항목 2건은 공유용 제출 규칙이라 무시해도 됩니다.
-2. `claude plugin test <MOD_DIR>`를 실행해 주세요. 테스트 25건이 모두 통과해야 합니다.
+2. `claude plugin test <MOD_DIR>`를 실행해 주세요. 테스트 30건이 모두 통과해야 합니다.
 3. 실패가 있으면 코드를 임의로 고치지 말고 출력 전체를 보여 주세요.
 
 ## 단계 4. 현재 세션에 바로 적용
@@ -1170,7 +1185,7 @@ Claude는 슬래시 명령을 직접 실행할 수 없으므로, 아래처럼 �
 ## 알아 둘 점
 
 - **모델 이름**: 이름에서 계열과 버전을 직접 읽으므로(`claude-sonnet-5-5`는 Sonnet 5.5) 새 모델이나 새 계열이 나와도 코드를 고칠 필요가 없습니다. 이모지는 opus, sonnet, haiku, fable만 고정이고 새 계열은 이름에서 정해진 이모지를 씁니다. Claude 이름이 아닌 모델은 원래 이름 그대로 표시합니다.
-- **CPU·RAM 줄**: Windows PowerShell(`Get-CimInstance`)로 측정하므로 Windows에서만 나옵니다. macOS와 Linux에서는 이 줄이 나오지 않습니다(다른 줄에는 영향이 없습니다).
+- **CPU·RAM 줄**: Windows PowerShell(`Get-CimInstance`)로 측정하므로 Windows에서만 나옵니다. macOS와 Linux에서는 맨 아래 줄에서 CPU·RAM 조각만 빠지고, 비용과 경과 시간은 그대로 나옵니다.
 - **계정 이메일 표시**: 첫 줄에 로그인한 계정의 이메일이 그대로 보입니다. 화면을 공유하거나 캡처할 때 주의해 주세요.
 - **밴드 폭**: 터미널 폭이 약 110칸보다 좁으면 줄이 넘칠 수 있습니다.
 - **구독이 아닌 세션**: 5시간·7일 한도 정보가 없으면 두 막대는 나오지 않고 Context만 표시됩니다.

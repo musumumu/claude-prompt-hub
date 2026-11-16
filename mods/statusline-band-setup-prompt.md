@@ -14,6 +14,7 @@
 - 둘째~넷째 줄: Context(자동 압축을 설정했다면 압축 기준 %도 함께, "⚠ 컴팩트 임박" 경고는 압축 기준보다 10%p 앞에서, 설정이 없으면 90%부터), 5시간 한도, 7일 한도(사용률이 기간 경과율보다 20%p 이상 앞서면 "⚠ 빠름")를 한 줄에 하나씩, 라벨·막대·%·부가 정보가 세로로 맞게 표시(막대 색이 반 칸 단위로 부드럽게 이어지고, % 숫자는 90% 이상이면 빨강)
 - 테두리: 평소에는 파란색, 작업 중에는 파랑과 보라가 시계 방향으로 흐르며, 응답이 끝난 뒤 3초 동안 유지
 - 마지막 줄: CPU·RAM 막대(10초마다 갱신), 비용, 세션 경과 시간
+- 한도 %와 초기화까지 남은 시간은 프롬프트를 주고받지 않아도 30초마다 갱신
 
 ## 단계 0. 적용 범위 선택
 
@@ -233,6 +234,7 @@ const WARN_MARGIN = 10 // 자동 압축 기준을 설정했을 때, 기준보다
 
 const MACHINE_INTERVAL_MS = 10_000
 const HEAD_INTERVAL_MS = 2_000
+const REFRESH_INTERVAL_MS = 30_000 // 응답이 없어도 한도 %와 초기화 시간이 갱신되도록 전체 값을 주기적으로 다시 읽는다
 const MACHINE_SCRIPT =
   '$o=Get-CimInstance Win32_OperatingSystem;' +
   '[pscustomobject]@{cpu=(Get-CimInstance Win32_Processor|Measure-Object LoadPercentage -Average).Average;' +
@@ -482,10 +484,12 @@ export const register: Register = on => {
     const machineTimer = $.clock.every(MACHINE_INTERVAL_MS, () => sampleMachine($))
     const frameTimer = $.clock.every(FRAME_INTERVAL_MS, () => tickFrame($))
     const headTimer = $.clock.every(HEAD_INTERVAL_MS, () => refreshHead($))
+    const refreshTimer = $.clock.every(REFRESH_INTERVAL_MS, () => refresh($))
     stopTimers = () => {
       machineTimer.cancel()
       frameTimer.cancel()
       headTimer.cancel()
+      refreshTimer.cancel()
     }
     return next(e)
   })

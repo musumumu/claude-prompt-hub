@@ -12,7 +12,7 @@
 
 - 첫 줄: 모델 이모지와 모델명(예: Sonnet 5.5), effort, 폴더, git 브랜치(변경 파일 수 `*3`, 올릴 커밋 `↑1`, 받을 커밋 `↓2`는 0이 아닐 때만), 그리고 흐리게 계정 이메일과 구독 종류
 - 둘째~넷째 줄: Context(자동 압축을 설정했다면 압축 기준 %도 함께, "⚠ 컴팩트 임박" 경고는 압축 기준보다 10%p 앞에서, 설정이 없으면 90%부터), 5시간 한도, 7일 한도(사용률이 기간 경과율보다 20%p 이상 앞서면 "⚠ 빠름")를 한 줄에 하나씩, 라벨·막대·%·부가 정보가 세로로 맞게 표시(막대 색이 반 칸 단위로 부드럽게 이어지고, % 숫자는 90% 이상이면 빨강)
-- 테두리: 평소에는 파란색, 작업 중에는 파랑과 보라가 시계 방향으로 흐르며, 응답이 끝난 뒤 3초 동안 유지
+- 테두리: 평소에는 파란색, 작업 중(서브에이전트가 일하는 동안 포함)에는 파랑과 보라가 시계 방향으로 흐르며, 응답이 끝난 뒤 3초 동안 유지
 - 마지막 줄: CPU·RAM 막대(10초마다 갱신), 비용, 세션 경과 시간
 - 한도 %와 초기화까지 남은 시간은 프롬프트를 주고받지 않아도 30초마다 갱신
 
@@ -163,10 +163,21 @@ let engineWorking = false // 마지막으로 그릴 때 엔진이 알려 준 처
 let offTicks = 0
 let flowShown = false
 let tickN = 0
+let agentsBusy = false // 서브에이전트가 일하는 중인지. 메인 응답이 끝났거나 대기 중이어도 테두리를 돌린다.
 
-// 테두리가 도는 상태(처리 중이거나 응답 직후 유지 시간)를 화면용 값으로 내보낸다.
+// 서브에이전트가 일하는 중인지 읽는다. 실패하면 이전 값을 유지한다.
+async function pollAgents($: EngineInterface) {
+  try {
+    const agents = await $.agent.list()
+    agentsBusy = agents.some(a => a.status === 'running' || a.status === 'pending' || a.status === 'waiting')
+  } catch {
+    /* 목록을 못 읽으면 이전 값을 쓴다 */
+  }
+}
+
+// 테두리가 도는 상태(처리 중이거나 응답 직후 유지 시간, 서브에이전트 작업 중)를 화면용 값으로 내보낸다.
 async function publishFlow($: EngineInterface) {
-  const animating = isWorking || lingerTicks > 0
+  const animating = isWorking || lingerTicks > 0 || agentsBusy
   flowShown = animating
   await update($, flowAtom, () => ({ animating }))
 }
@@ -174,6 +185,7 @@ async function publishFlow($: EngineInterface) {
 // 처리 중이거나 응답 직후 유지 시간인 동안에만 일한다. 둘 다 끝나면 테두리 상태를 한 번 지우고 멈춘다.
 async function tickFrame($: EngineInterface) {
   tickN += 1
+  if (tickN % FLOW_EVERY_TICKS === 0) await pollAgents($)
   // 엔진은 처리 중이 아니라는데 내 표시만 켜져 있으면(종료 이벤트를 놓친 경우) 잠시 뒤 끝난 것으로 본다.
   offTicks = isWorking && !engineWorking ? offTicks + 1 : 0
   if (offTicks >= STUCK_TICKS) {
@@ -181,7 +193,7 @@ async function tickFrame($: EngineInterface) {
     lingerTicks = Math.ceil(LINGER_MS / FRAME_INTERVAL_MS)
     offTicks = 0
   }
-  const animating = isWorking || lingerTicks > 0
+  const animating = isWorking || lingerTicks > 0 || agentsBusy
   if (!animating && !flowShown) return
   if (animating) await update($, frameAtom, n => n + 1)
   if (lingerTicks > 0) lingerTicks -= 1

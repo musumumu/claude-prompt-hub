@@ -234,7 +234,7 @@ const WARN_MARGIN = 10 // 자동 압축 기준을 설정했을 때, 기준보다
 
 const MACHINE_INTERVAL_MS = 10_000
 const HEAD_INTERVAL_MS = 2_000
-const REFRESH_INTERVAL_MS = 30_000 // 응답이 없어도 한도 %와 초기화 시간이 갱신되도록 전체 값을 주기적으로 다시 읽는다
+const REFRESH_INTERVAL_MS = 30_000 // 응답이 없어도 한도 %와 초기화 시간이 갱신되도록 주기적으로 다시 읽는다(git은 제외)
 const MACHINE_SCRIPT =
   '$o=Get-CimInstance Win32_OperatingSystem;' +
   '[pscustomobject]@{cpu=(Get-CimInstance Win32_Processor|Measure-Object LoadPercentage -Average).Average;' +
@@ -433,7 +433,8 @@ async function refreshHead($: EngineInterface) {
   await update($, snapAtom, s => (s === null ? s : { ...s, model, effort }))
 }
 
-async function refresh($: EngineInterface) {
+// withGit이 false면 git status를 실행하지 않고 이전 snap의 git 값을 그대로 쓴다(주기 갱신용).
+async function refresh($: EngineInterface, withGit = true) {
   const usage = await $.session.usage()
   const model = await $.session.model()
   const cwd = await $.session.cwd()
@@ -442,11 +443,16 @@ async function refresh($: EngineInterface) {
   const effort = await currentEffort($, model)
 
   let git = { branch: '', dirty: 0, ahead: 0, behind: 0 }
-  try {
-    const r = await $.process.run(['git', 'status', '--porcelain', '-b'], { cwd, timeoutMs: 3000 })
-    if (r.exitCode === 0) git = parseGit(r.stdout)
-  } catch {
-    /* git 저장소가 아니거나 git이 없는 경우 */
+  if (withGit) {
+    try {
+      const r = await $.process.run(['git', 'status', '--porcelain', '-b'], { cwd, timeoutMs: 3000 })
+      if (r.exitCode === 0) git = parseGit(r.stdout)
+    } catch {
+      /* git 저장소가 아니거나 git이 없는 경우 */
+    }
+  } else {
+    const prev = await read($, snapAtom)
+    if (prev !== null) git = { branch: prev.branch, dirty: prev.dirty, ahead: prev.ahead, behind: prev.behind }
   }
 
   const limits: Limit[] = usage.rateLimits.map(l => ({
@@ -484,7 +490,7 @@ export const register: Register = on => {
     const machineTimer = $.clock.every(MACHINE_INTERVAL_MS, () => sampleMachine($))
     const frameTimer = $.clock.every(FRAME_INTERVAL_MS, () => tickFrame($))
     const headTimer = $.clock.every(HEAD_INTERVAL_MS, () => refreshHead($))
-    const refreshTimer = $.clock.every(REFRESH_INTERVAL_MS, () => refresh($))
+    const refreshTimer = $.clock.every(REFRESH_INTERVAL_MS, () => refresh($, false))
     stopTimers = () => {
       machineTimer.cancel()
       frameTimer.cancel()

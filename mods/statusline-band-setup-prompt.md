@@ -182,7 +182,8 @@ async function publishFlow($: EngineInterface) {
   await update($, flowAtom, () => ({ animating }))
 }
 
-// 처리 중이거나 응답 직후 유지 시간인 동안에만 일한다. 둘 다 끝나면 테두리 상태를 한 번 지우고 멈춘다.
+// 서브에이전트 조회는 대기 중에도 1초마다 한다. 테두리는 처리 중, 응답 직후 유지 시간, 서브에이전트 작업 중
+// 어느 하나라도 해당하는 동안 돌고, 모두 끝나면 테두리 상태를 한 번 지우고 멈춘다.
 async function tickFrame($: EngineInterface) {
   tickN += 1
   if (tickN % FLOW_EVERY_TICKS === 0) await pollAgents($)

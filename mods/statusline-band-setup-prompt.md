@@ -576,9 +576,12 @@ export const register: Register = on => {
     // 90% 이상은 빨강, 그 아래는 초록 → 노랑 → 코랄 그라데이션
     const pctColor = (p: number) => (p >= 90 ? '#e04444' : gradient(p / 100))
 
+    // 줄마다 폭을 넘으면 접지 않고 끝을 잘라 한 줄로 둔다. 접히면 줄 수가 늘어 직접 그린 좌우 테두리와 어긋난다.
+    const ONE_LINE = 'truncate-end'
+
     // 게이지 한 줄: 라벨 칸과 % 칸을 고정해, 위아래 줄의 막대와 숫자가 세로로 맞게 한다.
     const gauge = (key: string, icon: string, label: string, pct: number, tail: string, warn = '') => (
-      <Text key={key}>
+      <Text key={key} wrap={ONE_LINE}>
         {icon} <Text color={GRAY}>{padCells(label, LABEL_CELLS)}</Text> {bar(pct)}{'  '}
         <Text bold color={pctColor(pct)}>{`${Math.round(pct)}%`.padEnd(5)}</Text>
         <Text dimColor>{tail}</Text>
@@ -599,7 +602,7 @@ export const register: Register = on => {
     // 첫 줄: 모델이 가장 눈에 띄고, 이메일·플랜은 흐리게 맨 끝에 둔다.
     rows.push(
       <Box key="head">
-        <Text>
+        <Text wrap={ONE_LINE}>
           <Text>{modelEmoji(snap.model)} </Text>
           <Text bold color="#5b9bf0">{modelLabel(snap.model)}</Text>
           {snap.effort ? <Text color={EFFORT_COLOR[snap.effort] ?? GRAY}> ⚡{snap.effort.toUpperCase()}</Text> : null}
@@ -657,7 +660,7 @@ export const register: Register = on => {
       if (i > 0) footJoined.push(<Text key={`fsep${i}`} color={GRAY}> │ </Text>)
       footJoined.push(f)
     })
-    rows.push(<Text key="foot">{footJoined}</Text>)
+    rows.push(<Text key="foot" wrap={ONE_LINE}>{footJoined}</Text>)
 
     // 대기 중: 정지한 파란 테두리. 처리 중이 아니어도 응답 직후 유지 시간(flow.animating) 중이면 처리 중 모양을 쓴다.
     if (!e.props.isWorking && !flow.animating) {
@@ -896,6 +899,24 @@ test('게이지는 한 줄에 하나씩, 라벨 칸이 맞고 CPU·RAM·비용·
   await ui.unmount()
 })
 
+// 좁은 화면에서 줄이 접히면 직접 그린 좌우 테두리와 줄 수가 어긋나므로, 모든 줄은 끝을 잘라 한 줄로 둔다.
+for (const working of [false, true]) {
+  test(`좁은 폭(${working ? '처리 중' : '대기 중'})에서도 모든 줄은 접히지 않고 한 줄로 잘린다`, async ($, on) => {
+    stubEngine(on)
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+    const ui = await $.ui.mount(BAND(working, 50))
+    const texts = (await ui.findAll({ type: 'Text' })) as any[]
+    const head = texts.find(t => t.text.includes('Sonnet 5.5') && t.text.includes('📁'))
+    const rows = [head, ...['🧠 Context', '⏰ 5h 한도', '📅 7d 한도', '💻 CPU'].map(p => texts.find(t => t.text.startsWith(p)))]
+    for (const r of rows) {
+      expect(r).toBeDefined()
+      expect(r.props?.wrap).toBe('truncate-end')
+    }
+    await ui.unmount()
+  })
+}
+
 test('모든 막대는 어떤 백분율에서도 8칸이다', async ($, on) => {
   const opts = { pct: 0, frame: 0 }
   stubEngine(on, opts)
@@ -1125,7 +1146,7 @@ for (const c of [
 ## 단계 3. 검증
 
 1. `claude plugin validate <MOD_DIR>`를 실행해 주세요. 타입 오류(`error TS`)나 `skipped`가 없어야 합니다. README와 LICENSE가 없다는 항목 2건은 공유용 제출 규칙이라 무시해도 됩니다. 이 2건은 출력에 "refuses a submission"이라는 문장과 함께 나오지만 같은 이유이므로 함께 무시하세요.
-2. `claude plugin test <MOD_DIR>`를 실행해 주세요. 테스트 44건이 모두 통과해야 합니다.
+2. `claude plugin test <MOD_DIR>`를 실행해 주세요. 테스트 46건이 모두 통과해야 합니다.
 3. 실패가 있으면 코드를 임의로 고치지 말고 출력 전체를 보여 주세요.
 
 ## 단계 4. 현재 세션에 바로 적용
@@ -1143,7 +1164,7 @@ Claude는 슬래시 명령을 직접 실행할 수 없으므로, 아래처럼 �
 - **모델 이름**: 이름에서 계열과 버전을 직접 읽으므로(`claude-sonnet-5-5`는 Sonnet 5.5) 새 모델이나 새 계열이 나와도 코드를 고칠 필요가 없습니다. 이모지는 opus, sonnet, haiku, fable만 고정이고 새 계열은 이름에서 정해진 이모지를 씁니다. Claude 이름이 아닌 모델은 원래 이름 그대로 표시합니다.
 - **CPU·RAM 줄**: Windows PowerShell(`Get-CimInstance`)로 측정하므로 Windows에서만 나옵니다. macOS와 Linux에서는 맨 아래 줄에서 CPU·RAM 조각만 빠지고, 비용과 경과 시간은 그대로 나옵니다.
 - **계정 이메일 표시**: 첫 줄에 로그인한 계정의 이메일이 그대로 보입니다. 화면을 공유하거나 캡처할 때 주의해 주세요.
-- **밴드 폭**: 터미널 폭이 약 110칸보다 좁으면 줄이 넘칠 수 있습니다.
+- **밴드 폭**: 터미널 폭이 약 110칸보다 좁으면 각 줄이 줄바꿈되지 않고 오른쪽 끝이 `…`로 잘립니다. 첫 줄은 이메일·구독 종류, 게이지 줄은 초기화 시간과 경고, 맨 아래 줄은 경과 시간부터 가려집니다.
 - **구독이 아닌 세션**: 5시간·7일 한도 정보가 없으면 두 막대는 나오지 않고 Context만 표시됩니다.
 - **git 표시**: `git status --porcelain -b`로 읽습니다. 추적되지 않는 새 파일도 변경 파일 수(`*`)에 들어가지만, git은 추적되지 않는 폴더를 한 줄로 묶어 보여 주므로 폴더 하나는 안에 파일이 여럿이어도 1로 셉니다. git 저장소가 아니면 브랜치와 함께 모두 빠지고, 서버(upstream) 브랜치가 없으면 `↑`·`↓`는 나오지 않습니다. 분리 HEAD 상태에서는 브랜치 이름이 없어 변경 파일 수(`*`)만 폴더 이름 뒤에 나옵니다. 아주 큰 저장소에서 `git status`가 3초 제한을 넘기면 브랜치 이름을 포함해 이 표시가 모두 사라집니다.
 - **한도 페이스 경고**: 5시간·7일 한도에서 "기간이 지난 비율"보다 사용률이 20%p 이상 앞서면 `⚠ 빠름`이 붙습니다(예: 5시간 중 2시간이 지났는데 60% 사용). 초기화 시각 정보가 없으면 표시하지 않습니다.
